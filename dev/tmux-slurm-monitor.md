@@ -7,8 +7,8 @@
 ```bash
 jid=$(sbatch path/to/job.sbatch | awk '{print $4}')
 ./dev/spawn_monitor.sh "$jid"
-# Parse the single line:
-# MONITOR_DONE {"jobid":"<id>","state":"<STATE>","exit":"A:B","elapsed":"HH:MM:SS","crumb":"..."}
+# Parse the single line (key/value payload — sample shown):
+# MONITOR_DONE job=<id> state=<STATE> exit=A:B elapsed=HH:MM:SS crumb=STATE1->STATE2 partition=compute nodelist=c003 nodes=1 timelimit=00:10:00 stdout=/path/slurm-<id>.out workdir=/path req_tres=cpu=4,mem=16G submit_time=2025-10-07T16:00:00
 ```
 
 ## Defaults
@@ -57,3 +57,15 @@ Consider the job **successful** only if:
 
 - `state == "COMPLETED"` **and**
 - major code in `exit` (`A` in `A:B`) is `0`.
+
+### Payload fields
+
+Every completion line includes `job`, `state`, `exit`, `elapsed`, and `crumb` (state breadcrumb). When available, additional key/value pairs capture:
+
+- `partition`, `queue_reason`
+- `nodelist`, `nodes`, `timelimit`
+- `submit_host`, `submit_time`, `priority`, `account`, `user`
+- `stdout`, `stderr`, `workdir`
+- `min_mem_cpu`, `cpus`, `cpus_per_task`, `req_tres` (and `gres` if requested)
+
+Values are sanitized (`(`, `)` removed; spaces replaced with `_`) so agents can parse them deterministically.

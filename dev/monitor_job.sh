@@ -16,15 +16,21 @@ if [[ -z "${NTFY_TOPIC:-}" && "${NTFY_DISABLE:-0}" != "1" ]]; then
 fi
 
 notify_ntfy(){
-  [[ "${NTFY_DISABLE:-0}" == "1" ]] && return
+  if [[ "${NTFY_DISABLE:-0}" == "1" ]]; then
+    return
+  fi
   local topic="${NTFY_TOPIC:-}"
-  [[ -z "$topic" ]] && return
+  if [[ -z "$topic" ]]; then
+    return
+  fi
   local base="${NTFY_URL:-https://ntfy.sh}"
   curl -fsS --max-time 5 \
     -H "Title: Slurm $JOBID" \
     -H "Tags: information_source" \
     -d "$1" "${base%/}/$topic" >/dev/null 2>&1 || true
 }
+
+trap 'log "ERR line $LINENO status $? (cmd: $BASH_COMMAND)"' ERR
 
 die(){ echo "Error: $*" >&2; exit 2; }
 log(){ echo "[monitor_job] $*" >&2; }
@@ -75,6 +81,28 @@ TIMEOUT_SEC=$(( TIMEOUT_MIN * 60 ))
 
 JOBROOT="${JOBID%%_*}"   # handles 12345_7 -> 12345 (for scontrol lookups)
 HIST=()
+QUEUE_REASON=""
+SQUEUE_PARTITION=""
+SQUEUE_TIMELIMIT=""
+SQUEUE_NNODES=""
+SQUEUE_NODELIST=""
+SQUEUE_REASON=""
+SUBMIT_HOST=""
+ACCOUNT=""
+USER_NAME=""
+STDOUT_PATH=""
+STDERR_PATH=""
+WORK_DIR=""
+REQ_MEM=""
+MIN_MEM_CPU=""
+NUM_CPUS=""
+CPUS_TASK=""
+GRES_REQ=""
+REQ_TRES=""
+SUBMIT_TIME=""
+PRIORITY=""
+NODELIST_ALLOC=""
+NUM_NODES=""
 
 # --- Helpers -----------------------------------------------------------------
 FAST_PHASE_SEC=${MONITOR_FAST_PHASE_SEC:-180}
@@ -91,10 +119,28 @@ sleep_with_jitter(){
   sleep "$dur"
 }
 
+secs_to_hms(){
+  local total=$1
+  if [[ -z "$total" || "$total" == "0" ]]; then
+    echo ""
+    return
+  fi
+  if (( total >= 86400 )); then
+    local days=$(( total / 86400 ))
+    local rem=$(( total % 86400 ))
+    printf '%d-%02d:%02d:%02d' "$days" $(( rem / 3600 )) $(( (rem % 3600) / 60 )) $(( rem % 60 ))
+  else
+    printf '%02d:%02d:%02d' $(( total / 3600 )) $(( (total % 3600) / 60 )) $(( total % 60 ))
+  fi
+}
+
 to_secs(){
   # Accept D-HH:MM:SS | HH:MM:SS | MM:SS | SS
   local t="$1"
-  [[ -z "$t" ]] && { echo 0; return; }
+  if [[ -z "$t" ]]; then
+    echo 0
+    return
+  fi
   if [[ "$t" =~ ^([0-9]+)-([0-9]{2}):([0-9]{2}):([0-9]{2})$ ]]; then
     echo $(( ${BASH_REMATCH[1]}*86400 + ${BASH_REMATCH[2]}*3600 + ${BASH_REMATCH[3]}*60 + ${BASH_REMATCH[4]} ))
   elif [[ "$t" =~ ^([0-9]{2}):([0-9]{2}):([0-9]{2})$ ]]; then
@@ -132,7 +178,9 @@ parse_sacct_terminal(){
     $1==jid".batch" {print; found=1; exit}
     END { if(!found) print "" }
   ' <<<"$rows")"
-  [[ -z "$line" ]] && line="$(awk -F'|' -v jid="$JOBID" '$1==jid {print; exit}' <<<"$rows")"
+  if [[ -z "$line" ]]; then
+    line="$(awk -F'|' -v jid="$JOBID" '$1==jid {print; exit}' <<<"$rows")"
+  fi
   # Fallback when sacct stores array task under different numeric JobID but retains task info in JobID field
   if [[ -z "$line" && "$JOBID" == *_* ]]; then
     line="$(awk -F'|' -v jid_root="$JOBROOT" -v jid="$JOBID" '
@@ -140,7 +188,9 @@ parse_sacct_terminal(){
       $1==jid_root && !found {print; found=1}
     ' <<<"$rows")"
   fi
-  [[ -z "$line" ]] && return 1
+  if [[ -z "$line" ]]; then
+    return 1
+  fi
 
   IFS='|' read -r jobid jobidraw state exit elapsed tlim <<<"$line"
   echo "state=$state exit=$exit elapsed=$elapsed tlim=$tlim"
@@ -201,6 +251,213 @@ format_breadcrumb(){
   done
   printf '%s' "$out"
 }
+
+sanitize_value(){
+  local val="$1"
+  local quote='"'
+  val=${val//$quote/}
+  val=${val//[()]/}
+  val=${val// /_}
+  echo "$val"
+}
+
+append_kv(){
+  local key="$1"
+  local raw="$2"
+  if [[ -z "$raw" ]]; then
+    return
+  fi
+  case "$raw" in
+    "(null)"|"None"|"UNKNOWN"|"Unknown") return ;;
+  esac
+  local value
+  value=$(sanitize_value "$raw")
+  if [[ -z "$value" ]]; then
+    return
+  fi
+  EXTRA_FIELDS+=("$key=$value")
+}
+
+extract_field(){
+  local info="$1" key="$2" match
+  match=$(grep -o "${key}=[^ ]*" <<<"$info" | tail -n1 || true)
+  if [[ -n "$match" ]]; then
+    echo "${match#*=}"
+  fi
+  return 0
+}
+
+collect_metadata(){
+  local info
+  info=$(scontrol show job -o "$JOBID" 2>/dev/null || true)
+  if [[ -z "$info" && "$JOBID" == *_* ]]; then
+    info=$(scontrol show job -o "$JOBROOT" 2>/dev/null || true)
+  fi
+  [[ -z "$info" ]] && return
+
+  local field
+
+  field=$(extract_field "$info" "SubmitHost")
+  if [[ -n "$field" ]]; then
+    SUBMIT_HOST="$field"
+  fi
+
+  field=$(extract_field "$info" "AllocNode")
+  if [[ -n "$field" && -z "$SUBMIT_HOST" ]]; then
+    SUBMIT_HOST="${field%%:*}"
+  fi
+
+  field=$(extract_field "$info" "Account")
+  if [[ -n "$field" ]]; then
+    ACCOUNT="$field"
+  fi
+
+  field=$(extract_field "$info" "UserId")
+  if [[ -n "$field" ]]; then
+    USER_NAME="${field%%(*}"
+  fi
+
+  field=$(extract_field "$info" "StdOut")
+  if [[ -n "$field" ]]; then
+    STDOUT_PATH="$field"
+  fi
+
+  field=$(extract_field "$info" "StdErr")
+  if [[ -n "$field" ]]; then
+    STDERR_PATH="$field"
+  fi
+
+  field=$(extract_field "$info" "WorkDir")
+  if [[ -n "$field" ]]; then
+    WORK_DIR="$field"
+  fi
+
+  field=$(extract_field "$info" "ReqMem")
+  if [[ -n "$field" ]]; then
+    REQ_MEM="$field"
+  fi
+
+  field=$(extract_field "$info" "MinMemoryCPU")
+  if [[ -n "$field" ]]; then
+    MIN_MEM_CPU="$field"
+  fi
+
+  field=$(extract_field "$info" "NumCPUs")
+  if [[ -n "$field" ]]; then
+    NUM_CPUS="$field"
+  fi
+
+  field=$(extract_field "$info" "CPUs/Task")
+  if [[ -n "$field" ]]; then
+    CPUS_TASK="$field"
+  fi
+
+  field=$(extract_field "$info" "ReqGRES")
+  if [[ -n "$field" ]]; then
+    GRES_REQ="$field"
+  fi
+
+  field=$(extract_field "$info" "ReqTRES")
+  if [[ -n "$field" ]]; then
+    REQ_TRES="$field"
+  fi
+
+  field=$(extract_field "$info" "SubmitTime")
+  if [[ -n "$field" ]]; then
+    SUBMIT_TIME="$field"
+  fi
+
+  field=$(extract_field "$info" "Priority")
+  if [[ -n "$field" ]]; then
+    PRIORITY="$field"
+  fi
+
+  field=$(extract_field "$info" "NodeList")
+  if [[ -n "$field" ]]; then
+    NODELIST_ALLOC="$field"
+  fi
+
+  field=$(extract_field "$info" "NumNodes")
+  if [[ -n "$field" ]]; then
+    NUM_NODES="$field"
+  fi
+
+  field=$(extract_field "$info" "Partition")
+  if [[ -n "$field" && -z "$SQUEUE_PARTITION" ]]; then
+    SQUEUE_PARTITION="$field"
+  fi
+
+  field=$(extract_field "$info" "TimeLimit")
+  if [[ -n "$field" && -z "$SQUEUE_TIMELIMIT" ]]; then
+    SQUEUE_TIMELIMIT="$field"
+  fi
+
+  field=$(extract_field "$info" "Reason")
+  if [[ -n "$field" && -z "$QUEUE_REASON" && "$field" != "None" ]]; then
+    QUEUE_REASON="$field"
+  fi
+}
+
+build_brief(){
+  local partition_display="${SQUEUE_PARTITION:-unknown}"
+  local node_display="${SQUEUE_NODELIST:-$NODELIST_ALLOC}"
+  if [[ -z "$node_display" || "$node_display" == "(null)" ]]; then
+    node_display="n/a"
+  fi
+  local reason_display="${QUEUE_REASON:-$SQUEUE_REASON}"
+  reason_display=${reason_display//[()]/}
+  if [[ -z "$reason_display" || "$reason_display" == "None" ]]; then
+    reason_display="None"
+  fi
+  printf '[monitor] job %s state=%s exit=%s elapsed=%s partition=%s nodes=%s reason=%s' \
+    "$JOBID" "$STATE" "$EXIT" "$ELAPSED" "$partition_display" "$node_display" "$reason_display"
+}
+
+build_done_line(){
+  EXTRA_FIELDS=()
+
+  local queue_reason="${QUEUE_REASON:-$SQUEUE_REASON}"
+  append_kv "queue_reason" "$queue_reason"
+
+  local partition_value="$SQUEUE_PARTITION"
+  append_kv "partition" "$partition_value"
+
+  local node_list_value="${SQUEUE_NODELIST:-$NODELIST_ALLOC}"
+  append_kv "nodelist" "$node_list_value"
+
+  local node_count_value="${SQUEUE_NNODES:-$NUM_NODES}"
+  append_kv "nodes" "$node_count_value"
+
+  local timelimit_display="$SQUEUE_TIMELIMIT"
+  if [[ -z "$timelimit_display" || "$timelimit_display" == "None" || "$timelimit_display" == "Unknown" ]]; then
+    if [[ "$TLIM_RUN_SECS" =~ ^[0-9]+$ ]] && (( TLIM_RUN_SECS > 0 )); then
+      timelimit_display="$(secs_to_hms "$TLIM_RUN_SECS")"
+    fi
+  fi
+  append_kv "timelimit" "$timelimit_display"
+
+  append_kv "submit_host" "$SUBMIT_HOST"
+  append_kv "account" "$ACCOUNT"
+  append_kv "user" "$USER_NAME"
+  append_kv "stdout" "$STDOUT_PATH"
+  append_kv "stderr" "$STDERR_PATH"
+  append_kv "workdir" "$WORK_DIR"
+  append_kv "req_mem" "$REQ_MEM"
+  append_kv "min_mem_cpu" "$MIN_MEM_CPU"
+  append_kv "cpus" "$NUM_CPUS"
+  append_kv "cpus_per_task" "$CPUS_TASK"
+  append_kv "gres" "$GRES_REQ"
+  append_kv "req_tres" "$REQ_TRES"
+  append_kv "submit_time" "$SUBMIT_TIME"
+  append_kv "priority" "$PRIORITY"
+
+  local done="MONITOR_DONE job=${JOBID} state=${STATE} exit=${EXIT} elapsed=${ELAPSED} crumb=${BREADCRUMB}"
+  if (( ${#EXTRA_FIELDS[@]} )); then
+    local IFS=' '
+    done+=" ${EXTRA_FIELDS[*]}"
+  fi
+  printf '%s' "$done"
+}
 cleanup_window(){
   if (( KEEP_WINDOW )); then return; fi
   if [[ -n "${TMUX_MONITOR_WINDOW:-}" ]] && command -v tmux >/dev/null 2>&1; then
@@ -211,7 +468,9 @@ cleanup_window(){
 # --- Main loop ---------------------------------------------------------------
 START_TS=$(date +%s)
 TLIM_RUN_SECS="$(read_timelimit || true)"
-[[ -n "$TLIM_RUN_SECS" ]] && log "SLURM TimeLimit (run): ${TLIM_RUN_SECS}s"
+if [[ -n "$TLIM_RUN_SECS" ]]; then
+  log "SLURM TimeLimit (run): ${TLIM_RUN_SECS}s"
+fi
 
 STATE=""
 ELAPSED="00:00:00"
@@ -227,10 +486,12 @@ while :; do
     ELAPSED="$ELAPSED"
     EXIT="0:0"
     record_breadcrumb "$STATE"
-    brief="[monitor] job ${JOBID} state=${STATE} exit=${EXIT} elapsed=${ELAPSED}"
+    collect_metadata
+    BREADCRUMB="$(format_breadcrumb)"
+    brief="$(build_brief)"
     notify_tmux "$brief"
     notify_ntfy "$brief"
-    done_line="MONITOR_DONE {\"jobid\":\"${JOBID}\",\"state\":\"${STATE}\",\"exit\":\"${EXIT}\",\"elapsed\":\"${ELAPSED}\",\"crumb\":\"$(format_breadcrumb)\"}"
+    done_line="$(build_done_line)"
     notify_tmux "$done_line"
     notify_ntfy "$done_line"
     # Exit behavior
@@ -241,8 +502,16 @@ while :; do
   # 1) While in queue or running -> squeue
   line="$(squeue_line)"
   if [[ -n "$line" ]]; then
-    IFS='|' read -r jobidraw state elapsed <<<"$line"
+    IFS='|' read -r jobidraw state elapsed reason partition tlimit nnodes nodelist <<<"$line"
     STATE="$state"; ELAPSED="$elapsed"
+    SQUEUE_REASON="$reason"
+    SQUEUE_PARTITION="$partition"
+    SQUEUE_TIMELIMIT="$tlimit"
+    SQUEUE_NNODES="$nnodes"
+    SQUEUE_NODELIST="$nodelist"
+    if [[ "$STATE" == "PENDING" && -n "$reason" && "$reason" != "None" && -z "$QUEUE_REASON" ]]; then
+      QUEUE_REASON="$reason"
+    fi
     record_breadcrumb "$STATE"
 
     # Optional early warning if approaching walltime while RUNNING
@@ -285,11 +554,12 @@ while :; do
   fi
 done
 
+collect_metadata
 BREADCRUMB="$(format_breadcrumb)"
-brief="[monitor] job ${JOBID} state=${STATE} exit=${EXIT} elapsed=${ELAPSED}"
+brief="$(build_brief)"
 notify_tmux "$brief"
 notify_ntfy "$brief"
-done_line="MONITOR_DONE {\"jobid\":\"${JOBID}\",\"state\":\"${STATE}\",\"exit\":\"${EXIT}\",\"elapsed\":\"${ELAPSED}\",\"crumb\":\"${BREADCRUMB}\"}"
+done_line="$(build_done_line)"
 notify_tmux "$done_line"
 notify_ntfy "$done_line"
 

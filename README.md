@@ -3,9 +3,9 @@
 Non-blocking SLURM job monitoring that plays nicely with tmux-driven workflows and LLM agents. Each job gets its own tmux window that polls `squeue` while running, falls back to `sacct` for terminal states, and then sends two keystrokes back to your agent pane:
 
 1. a human-readable status line
-2. a machine-readable `MONITOR_DONE {"jobid":...}` line (followed by Enter)
+2. a single key/value payload (`MONITOR_DONE job=<id> state=<...> exit=<...> …`) followed by Enter
 
-Your agent can simply wait for the JSON line on stdin, parse it, and proceed with the next task (collect results, trigger new work, update dashboards, etc.). Optional [ntfy](https://ntfy.sh) integration mirrors the same messages to push notifications.
+Your agent can simply watch stdin for the `MONITOR_DONE` line, parse the key/value pairs, and proceed with the next task (collect results, trigger new work, update dashboards, etc.). Optional [ntfy](https://ntfy.sh) integration mirrors the same messages to push notifications.
 
 > **Why tmux?**
 > Agents (or humans) running inside tmux panes cannot block on long `squeue` loops without tying up the session. Instead, we spawn a detached watcher window that does the polling and notifies the originating pane as soon as the job finishes.
@@ -20,7 +20,7 @@ jid=$(sbatch job.sbatch | awk '{print $4}')
 ./dev/spawn_monitor.sh "$jid"
 
 # 3. Consume the completion line from your agent
-# MONITOR_DONE {"jobid":"<id>","state":"<STATE>","exit":"A:B","elapsed":"HH:MM:SS","crumb":"..."}
+# MONITOR_DONE job=<id> state=<STATE> exit=A:B elapsed=HH:MM:SS crumb=STATE1->STATE2 partition=compute nodelist=c003 nodes=1 timelimit=00:10:00 stdout=/path/slurm-<id>.out ...
 ```
 
 Defaults:
@@ -51,7 +51,8 @@ Add the repo (or just the `dev/` directory) to your `$PATH`, or copy the scripts
 ## Integration tips
 
 - Call `spawn_monitor.sh` immediately after `sbatch` to capture the job ID while it’s hot.
-- Parse the JSON payload and treat the job as successful **only** when `state == "COMPLETED"` *and* the major exit code (`A` in `A:B`) equals `0`.
+- Parse the key/value payload and treat the job as successful **only** when `state == COMPLETED` *and* the major exit code (`A` in `A:B`) equals `0`.
+- The payload includes partition, nodes, queue reason, walltime limit, stdout/stderr paths, workdir, CPU/memory request info, `ReqTRES`, submit time, and priority (when Slurm reports them). Values are sanitized (spaces → `_`, parentheses removed) so agents can pattern-match reliably.
 - Use `--keep-window` if you want to inspect the watcher output later; otherwise it tears down automatically.
 - For array jobs, monitor individual tasks by passing `123456_7` instead of the root job.
 
