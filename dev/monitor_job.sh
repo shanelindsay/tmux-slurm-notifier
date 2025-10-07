@@ -87,12 +87,7 @@ SQUEUE_TIMELIMIT=""
 SQUEUE_NNODES=""
 SQUEUE_NODELIST=""
 SQUEUE_REASON=""
-SUBMIT_HOST=""
-ACCOUNT=""
-USER_NAME=""
 STDOUT_PATH=""
-STDERR_PATH=""
-WORK_DIR=""
 REQ_MEM=""
 MIN_MEM_CPU=""
 NUM_CPUS=""
@@ -297,39 +292,9 @@ collect_metadata(){
 
   local field
 
-  field=$(extract_field "$info" "SubmitHost")
-  if [[ -n "$field" ]]; then
-    SUBMIT_HOST="$field"
-  fi
-
-  field=$(extract_field "$info" "AllocNode")
-  if [[ -n "$field" && -z "$SUBMIT_HOST" ]]; then
-    SUBMIT_HOST="${field%%:*}"
-  fi
-
-  field=$(extract_field "$info" "Account")
-  if [[ -n "$field" ]]; then
-    ACCOUNT="$field"
-  fi
-
-  field=$(extract_field "$info" "UserId")
-  if [[ -n "$field" ]]; then
-    USER_NAME="${field%%(*}"
-  fi
-
   field=$(extract_field "$info" "StdOut")
   if [[ -n "$field" ]]; then
     STDOUT_PATH="$field"
-  fi
-
-  field=$(extract_field "$info" "StdErr")
-  if [[ -n "$field" ]]; then
-    STDERR_PATH="$field"
-  fi
-
-  field=$(extract_field "$info" "WorkDir")
-  if [[ -n "$field" ]]; then
-    WORK_DIR="$field"
   fi
 
   field=$(extract_field "$info" "ReqMem")
@@ -409,8 +374,12 @@ build_brief(){
   if [[ -z "$reason_display" || "$reason_display" == "None" ]]; then
     reason_display="None"
   fi
-  printf '[monitor] job %s state=%s exit=%s elapsed=%s partition=%s nodes=%s reason=%s' \
-    "$JOBID" "$STATE" "$EXIT" "$ELAPSED" "$partition_display" "$node_display" "$reason_display"
+  local target_display="n/a"
+  if [[ -n "${TMUX_TARGET:-}" ]]; then
+    target_display="${TMUX_TARGET%.*}"
+  fi
+  printf '[monitor] job %s state=%s exit=%s elapsed=%s partition=%s nodes=%s reason=%s target=%s' \
+    "$JOBID" "$STATE" "$EXIT" "$ELAPSED" "$partition_display" "$node_display" "$reason_display" "$target_display"
 }
 
 build_done_line(){
@@ -436,12 +405,7 @@ build_done_line(){
   fi
   append_kv "timelimit" "$timelimit_display"
 
-  append_kv "submit_host" "$SUBMIT_HOST"
-  append_kv "account" "$ACCOUNT"
-  append_kv "user" "$USER_NAME"
   append_kv "stdout" "$STDOUT_PATH"
-  append_kv "stderr" "$STDERR_PATH"
-  append_kv "workdir" "$WORK_DIR"
   append_kv "req_mem" "$REQ_MEM"
   append_kv "min_mem_cpu" "$MIN_MEM_CPU"
   append_kv "cpus" "$NUM_CPUS"
@@ -450,6 +414,19 @@ build_done_line(){
   append_kv "req_tres" "$REQ_TRES"
   append_kv "submit_time" "$SUBMIT_TIME"
   append_kv "priority" "$PRIORITY"
+
+  local target_session=""
+  local target_window=""
+  local target_display=""
+  if [[ -n "${TMUX_TARGET:-}" ]]; then
+    target_display="${TMUX_TARGET%.*}"
+    target_session="${TMUX_TARGET%%:*}"
+    target_window="${TMUX_TARGET#*:}"
+    target_window="${target_window%.*}"
+  fi
+  append_kv "target_session" "$target_session"
+  append_kv "target_window" "$target_window"
+  append_kv "monitor_window" "${TMUX_MONITOR_WINDOW:-}"
 
   local done="MONITOR_DONE job=${JOBID} state=${STATE} exit=${EXIT} elapsed=${ELAPSED} crumb=${BREADCRUMB}"
   if (( ${#EXTRA_FIELDS[@]} )); then

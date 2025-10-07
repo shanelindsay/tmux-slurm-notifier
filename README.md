@@ -52,7 +52,7 @@ Add the repo (or just the `dev/` directory) to your `$PATH`, or copy the scripts
 
 - Call `spawn_monitor.sh` immediately after `sbatch` to capture the job ID while it’s hot.
 - Parse the key/value payload and treat the job as successful **only** when `state == COMPLETED` *and* the major exit code (`A` in `A:B`) equals `0`.
-- The payload includes partition, nodes, queue reason, walltime limit, stdout/stderr paths, workdir, CPU/memory request info, `ReqTRES`, submit time, and priority (when Slurm reports them). Values are sanitized (spaces → `_`, parentheses removed) so agents can pattern-match reliably.
+- The payload includes partition, nodes, queue reason, walltime limit, stdout path, CPU/memory request info, `ReqTRES`, submit time, priority, and the tmux destination (`target_session`, `target_window`, `monitor_window`) when available. Values are sanitized (spaces → `_`, parentheses removed) so agents can pattern-match reliably.
 - Use `--keep-window` if you want to inspect the watcher output later; otherwise it tears down automatically.
 - For array jobs, monitor individual tasks by passing `123456_7` instead of the root job.
 

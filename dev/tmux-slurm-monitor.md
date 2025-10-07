@@ -64,8 +64,9 @@ Every completion line includes `job`, `state`, `exit`, `elapsed`, and `crumb` (s
 
 - `partition`, `queue_reason`
 - `nodelist`, `nodes`, `timelimit`
-- `submit_host`, `submit_time`, `priority`, `account`, `user`
-- `stdout`, `stderr`, `workdir`
+- `stdout`
 - `min_mem_cpu`, `cpus`, `cpus_per_task`, `req_tres` (and `gres` if requested)
+- `submit_time`, `priority`
+- `target_session`, `target_window`, `monitor_window` (tmux destinations)
 
 Values are sanitized (`(`, `)` removed; spaces replaced with `_`) so agents can parse them deterministically.
