@@ -65,11 +65,24 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import requests
 
 ISO8601 = "%Y-%m-%dT%H:%M:%SZ"
+
+_ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+_WATERMARK_BACKOFF = _dt.timedelta(seconds=30)
+_ENV_ALLOWLIST = {
+    "PATH",
+    "HOME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "TMPDIR",
+    "PYTHONPATH",
+}
 
 def _now_utc() -> str:
     return _dt.datetime.utcnow().strftime(ISO8601)
@@ -79,6 +92,47 @@ def _iso(dt: _dt.datetime) -> str:
 
 def _parse_iso(s: str) -> _dt.datetime:
     return _dt.datetime.strptime(s, ISO8601)
+
+
+def _strip_ansi(text: str) -> str:
+    if not text:
+        return text
+    return _ANSI_RE.sub("", text)
+
+
+def _compute_new_since(previous: str, batches: Iterable[Iterable[dict]]) -> str:
+    """Return the latest timestamp seen across batches, falling back to previous."""
+    candidates = [previous]
+    for batch in batches:
+        for item in batch:
+            for key in ("updated_at", "created_at"):
+                ts = item.get(key)
+                if ts:
+                    candidates.append(ts)
+    try:
+        return max(candidates)
+    except ValueError:
+        return previous
+
+
+def _build_subprocess_env(cwd: Path) -> Dict[str, str]:
+    env: Dict[str, str] = {}
+    for key in _ENV_ALLOWLIST:
+        value = os.environ.get(key)
+        if value is not None:
+            env[key] = value
+
+    for key, value in os.environ.items():
+        if key.startswith("POSIS_"):
+            env[key] = value
+
+    if os.environ.get("POSIS_FORWARD_GITHUB_TOKEN") == "1":
+        token = os.environ.get("GITHUB_TOKEN")
+        if token:
+            env["GITHUB_TOKEN"] = token
+
+    env.setdefault("PWD", str(cwd))
+    return env
 
 def discover_git_remote(path: Path) -> Optional[str]:
     """Return the remote.origin.url for a git repo at 'path', else None."""
@@ -429,9 +483,10 @@ def run_external(codex_cmd: str, codex_args: List[str], payload: Optional[str], 
             capture_output=True,
             timeout=timeout,
             cwd=str(cwd),
+            env=_build_subprocess_env(cwd),
         )
-        out = proc.stdout.decode("utf-8", errors="replace")
-        err = proc.stderr.decode("utf-8", errors="replace")
+        out = _strip_ansi(proc.stdout.decode("utf-8", errors="replace"))
+        err = _strip_ansi(proc.stderr.decode("utf-8", errors="replace"))
         max_chars = 60000
         if len(out) > max_chars:
             out = out[:max_chars] + "\n\n[output truncated]"
@@ -539,13 +594,19 @@ def decide_codex_invocation(
 
 def format_result_comment(ok: bool, run_id: str, returncode: int, out: str, err: str) -> str:
     out = (out or "").strip()
-    if out:
+    err = (err or "").strip()
+
+    if ok and out:
         return out
 
-    err = (err or "").strip()
+    if not ok:
+        body = err or out or "(no output)"
+        return f"```\n{body}\n```\n\n_exit code: {returncode}_"
+
+    if out:
+        return out
     if err:
         return f"```\n{err}\n```"
-
     return f"(run {run_id} exited with code {returncode} without producing output)"
 
 def extract_resume_flag(text: str) -> bool:
@@ -620,11 +681,17 @@ def main():
                     continue
 
                 since = meta.get("last_since") or _iso(_dt.datetime.utcnow() - _dt.timedelta(days=7))
+                try:
+                    since_dt = _parse_iso(since)
+                except ValueError:
+                    since_dt = _dt.datetime.utcnow() - _dt.timedelta(days=7)
+                    since = _iso(since_dt)
+
+                fetch_since = _iso(since_dt - _WATERMARK_BACKOFF)
                 processed = set(meta.get("processed_comment_ids", []))
 
-                comments = gh.list_issue_comments_since(repo, since)
-                # Update watermark to now (double-guarded by processed_comment_ids)
-                meta["last_since"] = _now_utc()
+                comments: List[dict] = gh.list_issue_comments_since(repo, fetch_since)
+                issues: List[dict] = []
 
                 for c in sorted(comments, key=lambda x: x.get("created_at","")):
                     cid = c.get("id")
@@ -765,7 +832,7 @@ def main():
 
                 if cfg.match_target == "issue_or_comments":
                     issue_runs = meta.setdefault("issue_runs", {})
-                    issues = gh.list_issues_since(repo, since)
+                    issues = gh.list_issues_since(repo, fetch_since)
                     for issue in issues:
                         if "pull_request" in issue:
                             continue
@@ -881,6 +948,8 @@ def main():
                     meta["processed_comment_ids"] = meta["processed_comment_ids"][-2000:]
                     st.save()
 
+                meta["last_since"] = _compute_new_since(since, (comments, issues))
+
                 if cfg.per_repo_pause > 0:
                     time.sleep(cfg.per_repo_pause)
 
@@ -890,13 +959,39 @@ def main():
         except requests.HTTPError as e:
             resp = getattr(e, "response", None)
             retry_after = None
+            remaining = None
+            reset = None
             if resp is not None:
                 retry_after = resp.headers.get("Retry-After")
                 remaining = resp.headers.get("X-RateLimit-Remaining")
                 reset = resp.headers.get("X-RateLimit-Reset")
-                logging.warning("HTTPError %s; remaining=%s; reset=%s; retry_after=%s",
-                                e, remaining, reset, retry_after)
-            sleep_s = int(retry_after) if (retry_after and retry_after.isdigit()) else cfg.poll_seconds * 3
+                logging.warning(
+                    "HTTPError %s; remaining=%s; reset=%s; retry_after=%s",
+                    e,
+                    remaining,
+                    reset,
+                    retry_after,
+                )
+
+            sleep_s = cfg.poll_seconds * 3
+            remaining_int: Optional[int] = None
+            if remaining is not None:
+                try:
+                    remaining_int = int(remaining)
+                except ValueError:
+                    remaining_int = None
+
+            if remaining_int is not None and remaining_int <= 0 and reset is not None:
+                try:
+                    reset_ts = int(float(reset))
+                except (TypeError, ValueError):
+                    reset_ts = None
+                if reset_ts is not None:
+                    now = int(time.time())
+                    sleep_s = max(reset_ts - now, 0) + 1
+            elif retry_after and retry_after.isdigit():
+                sleep_s = max(int(retry_after), 1)
+
             time.sleep(sleep_s)
         except Exception as e:
             logging.exception("Unexpected error in poll loop: %r", e)

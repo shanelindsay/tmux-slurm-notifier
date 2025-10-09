@@ -1,8 +1,28 @@
 import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
+
+
+if "requests" not in sys.modules:
+    class _StubSession:
+        def __init__(self):
+            self.headers = {}
+
+        def get(self, *args, **kwargs):  # pragma: no cover - tests never rely on real HTTP
+            raise NotImplementedError("HTTP interactions are stubbed in unit tests")
+
+        def post(self, *args, **kwargs):  # pragma: no cover
+            raise NotImplementedError("HTTP interactions are stubbed in unit tests")
+
+        def delete(self, *args, **kwargs):  # pragma: no cover
+            raise NotImplementedError("HTTP interactions are stubbed in unit tests")
+
+    sys.modules["requests"] = types.SimpleNamespace(Session=_StubSession, HTTPError=Exception)
+
 
 from dev.s.posis import posis_watch_multi as pwm
 
@@ -212,6 +232,52 @@ class PostprocessStdoutTests(unittest.TestCase):
         raw = "Hello world"
         trimmed = pwm.postprocess_stdout(raw, "other")
         self.assertEqual(trimmed, raw)
+
+
+class WatermarkComputationTests(unittest.TestCase):
+    def test_compute_new_since_uses_latest_timestamp(self):
+        previous = "2025-10-01T00:00:00Z"
+        comments = [{"created_at": "2025-10-08T12:00:00Z"}]
+        issues = [{"updated_at": "2025-10-09T05:00:00Z"}]
+        result = pwm._compute_new_since(previous, (comments, issues))
+        self.assertEqual(result, "2025-10-09T05:00:00Z")
+
+    def test_compute_new_since_falls_back_when_empty(self):
+        previous = "2025-10-01T00:00:00Z"
+        result = pwm._compute_new_since(previous, ())
+        self.assertEqual(result, previous)
+
+    def test_compute_new_since_uses_comment_when_issues_missing(self):
+        previous = "2025-10-01T00:00:00Z"
+        comments = [{"created_at": "2025-10-02T00:00:00Z"}]
+        result = pwm._compute_new_since(previous, (comments,))
+        self.assertEqual(result, "2025-10-02T00:00:00Z")
+
+
+class SubprocessEnvTests(unittest.TestCase):
+    def test_build_subprocess_env_scrubs_github_token(self):
+        with mock.patch.dict(
+            os.environ,
+            {"PATH": "/bin", "GITHUB_TOKEN": "secret", "POSIS_FORWARD_GITHUB_TOKEN": "0"},
+            clear=True,
+        ):
+            env = pwm._build_subprocess_env(Path("/tmp/work"))
+            self.assertNotIn("GITHUB_TOKEN", env)
+            self.assertEqual(env["PATH"], "/bin")
+            self.assertEqual(env["PWD"], "/tmp/work")
+
+    def test_build_subprocess_env_can_forward_token(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "PATH": "/bin",
+                "GITHUB_TOKEN": "secret",
+                "POSIS_FORWARD_GITHUB_TOKEN": "1",
+            },
+            clear=True,
+        ):
+            env = pwm._build_subprocess_env(Path("/tmp/work"))
+            self.assertEqual(env.get("GITHUB_TOKEN"), "secret")
 
 
 if __name__ == "__main__":

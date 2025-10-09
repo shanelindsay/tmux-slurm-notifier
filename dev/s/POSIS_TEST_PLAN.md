@@ -16,7 +16,7 @@ _Scope: single‑repo and multi‑repo watchers; GitHub issue comment triggers; 
 
 
 1. **Happy path**  
-   - In `repoA` working directory, start single‑repo watcher with `POSIS_TRIGGER=codexe`.  
+   - In `repoA` working directory, start single-repo watcher with `POSIS_REGEX='codexe'`.  
    - Create GitHub issue `#1` with a task description.  
    - Comment `codexe start`.  
    - Expect: watcher posts a result comment; verify `cwd` by checking the artefact file appears in `repoA` only.
@@ -58,7 +58,7 @@ _Scope: single‑repo and multi‑repo watchers; GitHub issue comment triggers; 
    - The posted result comment should contain only the Codex output (no POSIS status header).
 
 3. **Regex matching**  
-   - Set `POSIS_TRIGGER_REGEX='codexe\b'`. Comment variants:  
+   - Set `POSIS_REGEX='codexe\\b'`. Comment variants:  
      - `codexe` → should match.  
      - `CODEXE resume` → should match (case‑insensitive).  
      - `codex` → should not match.
