@@ -91,6 +91,86 @@ class ResumeDetectionTests(unittest.TestCase):
         self.assertFalse(pwm.extract_resume_flag("start fresh"))
 
 
+class IntentParsingTests(unittest.TestCase):
+    def test_default_intent(self):
+        self.assertEqual(pwm.extract_intent("codexe"), ("default", None))
+
+    def test_new_intent(self):
+        self.assertEqual(pwm.extract_intent("codexe new run"), ("new", None))
+
+    def test_resume_with_id(self):
+        self.assertEqual(pwm.extract_intent("codexe resume abc123"), ("resume", "abc123"))
+
+    def test_resume_without_id_case_insensitive(self):
+        self.assertEqual(pwm.extract_intent("CoDeXe RESUME"), ("resume", None))
+
+
+class RunIdExtractionTests(unittest.TestCase):
+    def test_extracts_from_run_id_line(self):
+        self.assertEqual(pwm.extract_codex_run_id("Run ID: abcd-1234"), "abcd-1234")
+
+    def test_extracts_from_resume_hint(self):
+        text = "Resume with: codex resume 9f8e7d"
+        self.assertEqual(pwm.extract_codex_run_id(text), "9f8e7d")
+
+    def test_extracts_from_json_blob(self):
+        self.assertEqual(pwm.extract_codex_run_id('{"id": "xyz_42"}'), "xyz_42")
+
+
+class CommandSelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = pwm.Config(token="token", root=Path("."))
+        self.cfg.codex_args = ["exec", "-"]
+        self.cfg.codex_resume_args = ["resume"]
+        self.cfg.default_resume = True
+        self.cfg.resume_send_context = False
+
+    def test_stored_id_default_intent_uses_resume(self):
+        args, send_payload, resume_flag, resume_id = pwm.decide_codex_invocation(
+            self.cfg, "default", None, "stored123"
+        )
+        self.assertEqual(args, ["resume", "stored123"])
+        self.assertFalse(send_payload)
+        self.assertTrue(resume_flag)
+        self.assertEqual(resume_id, "stored123")
+
+    def test_new_intent_forces_exec(self):
+        args, send_payload, resume_flag, resume_id = pwm.decide_codex_invocation(
+            self.cfg, "new", None, "stored123"
+        )
+        self.assertEqual(args, ["exec", "-"])
+        self.assertTrue(send_payload)
+        self.assertFalse(resume_flag)
+        self.assertIsNone(resume_id)
+
+    def test_resume_with_explicit_id(self):
+        args, send_payload, resume_flag, resume_id = pwm.decide_codex_invocation(
+            self.cfg, "resume", "explicit456", None
+        )
+        self.assertEqual(args, ["resume", "explicit456"])
+        self.assertFalse(send_payload)
+        self.assertTrue(resume_flag)
+        self.assertEqual(resume_id, "explicit456")
+
+    def test_resume_without_id_and_no_stored_falls_back(self):
+        args, send_payload, resume_flag, resume_id = pwm.decide_codex_invocation(
+            self.cfg, "resume", None, None
+        )
+        self.assertEqual(args, ["exec", "-"])
+        self.assertTrue(send_payload)
+        self.assertFalse(resume_flag)
+        self.assertIsNone(resume_id)
+
+    def test_resume_send_context_toggle(self):
+        self.cfg.resume_send_context = True
+        args, send_payload, resume_flag, resume_id = pwm.decide_codex_invocation(
+            self.cfg, "resume", "explicit789", None
+        )
+        self.assertTrue(send_payload)
+        self.assertTrue(resume_flag)
+        self.assertEqual(args, ["resume", "explicit789"])
+
+
 class ConfigTests(unittest.TestCase):
     def test_invalid_match_target_exits(self):
         with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "token", "POSIS_MATCH_TARGET": "nope"}, clear=True):

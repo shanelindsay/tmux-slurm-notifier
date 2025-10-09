@@ -156,11 +156,14 @@ class Config:
     state_path: Path = field(default=None)
     codex_cmd: str = field(default_factory=lambda: os.getenv("CODEX_CMD", "codex"))
     codex_args: List[str] = field(default_factory=lambda: os.getenv("CODEX_ARGS", "exec -").split())
+    codex_resume_args: List[str] = field(default_factory=lambda: os.getenv("CODEX_RESUME_ARGS", "resume").split())
     codex_timeout: int = field(default_factory=lambda: int(os.getenv("CODEX_TIMEOUT", "3600")))
     lockfile: Path = field(default=None)
     require_marker: bool = field(default_factory=lambda: os.getenv("POSIS_REQUIRE_MARKER", "0") == "1")
     exclude_dirs: List[str] = field(default_factory=lambda: [s for s in os.getenv("POSIS_EXCLUDE_DIRS", "").split(",") if s])
     ignore_self: bool = field(default_factory=lambda: os.getenv("POSIS_IGNORE_SELF", "1") == "1")
+    default_resume: bool = field(default_factory=lambda: os.getenv("POSIS_DEFAULT_RESUME", "1") == "1")
+    resume_send_context: bool = field(default_factory=lambda: os.getenv("POSIS_RESUME_SEND_CONTEXT", "0") == "1")
 
     def __post_init__(self):
         if self.state_path is None:
@@ -418,11 +421,11 @@ def build_job_input(repo: str, issue: dict, comments: List[dict], parent: Option
 
     return "\n".join(header)
 
-def run_external(codex_cmd: str, codex_args: List[str], payload: str, timeout: int, cwd: Path) -> Tuple[int, str, str]:
+def run_external(codex_cmd: str, codex_args: List[str], payload: Optional[str], timeout: int, cwd: Path) -> Tuple[int, str, str]:
     try:
         proc = subprocess.run(
             [codex_cmd] + codex_args,
-            input=payload.encode("utf-8"),
+            input=(payload.encode("utf-8") if payload is not None else None),
             capture_output=True,
             timeout=timeout,
             cwd=str(cwd),
@@ -477,6 +480,62 @@ def postprocess_stdout(out: str, codex_cmd: str) -> str:
         lines = lines[1:]
 
     return "\n".join(lines).strip() or out.strip()
+
+
+_RUN_ID_PATTERNS = [
+    re.compile(r"(?im)\b(?:run[ _-]?id|session)\s*[:=]\s*([A-Za-z0-9._-]{6,})"),
+    re.compile(r"(?im)\bresume\s+with:?\s*codex\s+resume\s+([A-Za-z0-9._-]{6,})"),
+    re.compile(r"(?im)\"id\"\s*:\s*\"([A-Za-z0-9._-]{6,})\""),
+]
+
+
+def extract_codex_run_id(text: str) -> Optional[str]:
+    """Return a Codex run identifier found in mixed stdout/stderr text, if any."""
+    blob = text or ""
+    for pat in _RUN_ID_PATTERNS:
+        match = pat.search(blob)
+        if match:
+            return match.group(1)
+    return None
+
+
+def extract_intent(text: str) -> Tuple[str, Optional[str]]:
+    """Infer trigger intent from comment text."""
+    snippet = text or ""
+    if re.search(r"(?i)\bcodexe\b.*\bnew\b", snippet):
+        return "new", None
+    resume_match = re.search(
+        r"(?i)\bcodexe\b.*\bresume\b(?:\s+([A-Za-z0-9._-]{6,}))?",
+        snippet,
+    )
+    if resume_match:
+        return "resume", resume_match.group(1)
+    return "default", None
+
+
+def decide_codex_invocation(
+    cfg: Config,
+    intent: str,
+    requested_id: Optional[str],
+    stored_id: Optional[str],
+) -> Tuple[List[str], bool, bool, Optional[str]]:
+    """Determine CLI arguments, stdin usage, and resume flag."""
+    intent = intent or "default"
+
+    if intent == "new":
+        return cfg.codex_args, True, False, None
+
+    if intent == "resume":
+        target_id = requested_id or stored_id
+        if target_id:
+            return cfg.codex_resume_args + [target_id], cfg.resume_send_context, True, target_id
+        return cfg.codex_args, True, False, None
+
+    if stored_id and cfg.default_resume:
+        return cfg.codex_resume_args + [stored_id], cfg.resume_send_context, True, stored_id
+
+    return cfg.codex_args, True, False, None
+
 
 def format_result_comment(ok: bool, run_id: str, returncode: int, out: str, err: str) -> str:
     out = (out or "").strip()
@@ -602,28 +661,62 @@ def main():
                         processed.add(cid)
                         continue
 
+                    issue_runs = meta.setdefault("issue_runs", {})
+
                     # Gather context for the issue
                     issue_comments = gh.list_issue_comments(repo, number)
                     parent_issue = None
-                    pnum = find_parent_issue_number(issue.get("body","") or "")
+                    pnum = find_parent_issue_number(issue.get("body", "") or "")
                     if pnum:
                         try:
                             parent_issue = gh.get_issue(repo, pnum)
                         except Exception as e:
                             logging.warning("Could not fetch parent issue #%s in %s: %r", pnum, repo, e)
 
-                    resume = extract_resume_flag(body)
-                    payload = build_job_input(repo, issue, issue_comments, parent_issue, c, resume=resume)
+                    intent, requested_id = extract_intent(body)
+                    issue_state = issue_runs.get(str(number), {})
+                    stored_id = issue_state.get("codex_run_id")
+                    args, send_payload, resume_flag, resume_target = decide_codex_invocation(
+                        cfg, intent, requested_id, stored_id
+                    )
 
-                    run_id = f"{repo.replace('/','_')}-{number}-{cid}-{int(time.time())}"
-                    log.info("Trigger from @%s on %s#%d (comment %s); resume=%s; run_id=%s; cwd=%s",
-                             author, repo, number, cid, resume, run_id, local_path)
+                    payload = build_job_input(
+                        repo,
+                        issue,
+                        issue_comments,
+                        parent_issue,
+                        c,
+                        resume=resume_flag,
+                    )
+                    payload_to_send = payload if send_payload else None
 
-                    rc, out, err = run_external(cfg.codex_cmd, cfg.codex_args, payload, cfg.codex_timeout, cwd=local_path)
+                    run_id = f"{repo.replace('/', '_')}-{number}-{cid}-{int(time.time())}"
+                    log.info(
+                        "Trigger from @%s on %s#%d (comment %s); intent=%s; resume=%s; run_id=%s; cwd=%s",
+                        author,
+                        repo,
+                        number,
+                        cid,
+                        intent,
+                        resume_flag,
+                        run_id,
+                        local_path,
+                    )
+
+                    rc, out, err = run_external(
+                        cfg.codex_cmd,
+                        args,
+                        payload_to_send,
+                        cfg.codex_timeout,
+                        cwd=local_path,
+                    )
                     processed_out = postprocess_stdout(out, cfg.codex_cmd)
 
-                    ok = bool(processed_out.strip())
+                    ok = (rc == 0) and bool(processed_out.strip())
                     comment_body = format_result_comment(ok, run_id, rc, processed_out, err)
+                    combined = "\n".join(part for part in (out, err) if part)
+                    codex_id = extract_codex_run_id(combined) or (resume_target if resume_flag else None)
+                    issue_updated_at = issue.get("updated_at") or issue.get("created_at") or _now_utc()
 
                     if ok and cid is not None:
                         try:
@@ -645,10 +738,24 @@ def main():
                         "last_run_at": _now_utc(),
                         "last_comment_id": cid,
                         "run_id": run_id,
-                        "resume": resume,
+                        "resume": resume_flag,
                         "returncode": rc,
                         "source": "comment",
+                        "codex_run_id": codex_id,
                     }
+
+                    new_issue_run = dict(issue_state)
+                    new_issue_run.update(
+                        {
+                            "last_issue_updated": issue_updated_at,
+                            "run_id": run_id,
+                            "returncode": rc,
+                            "status": "ok" if ok else "error",
+                        }
+                    )
+                    if codex_id:
+                        new_issue_run["codex_run_id"] = codex_id
+                    issue_runs[str(number)] = new_issue_run
 
                     meta.setdefault("processed_comment_ids", []).append(cid)
                     processed.add(cid)
@@ -693,18 +800,47 @@ def main():
                             "body": body_text or title_text,
                         }
 
-                        resume = extract_resume_flag(trigger_comment["body"])
-                        payload = build_job_input(repo, issue, issue_comments, parent_issue, trigger_comment, resume=resume)
+                        intent, requested_id = extract_intent(trigger_comment["body"])
+                        issue_state = issue_runs.get(str(number), {})
+                        stored_id = issue_state.get("codex_run_id")
+                        args, send_payload, resume_flag, resume_target = decide_codex_invocation(
+                            cfg, intent, requested_id, stored_id
+                        )
+
+                        payload = build_job_input(
+                            repo,
+                            issue,
+                            issue_comments,
+                            parent_issue,
+                            trigger_comment,
+                            resume=resume_flag,
+                        )
+                        payload_to_send = payload if send_payload else None
 
                         run_id = f"{repo.replace('/', '_')}-{number}-{trigger_id}-{int(time.time())}"
-                        log.info("Trigger from issue body/title on %s#%d; resume=%s; run_id=%s; cwd=%s",
-                                 repo, number, resume, run_id, local_path)
+                        log.info(
+                            "Trigger from issue body/title on %s#%d; intent=%s; resume=%s; run_id=%s; cwd=%s",
+                            repo,
+                            number,
+                            intent,
+                            resume_flag,
+                            run_id,
+                            local_path,
+                        )
 
-                        rc, out, err = run_external(cfg.codex_cmd, cfg.codex_args, payload, cfg.codex_timeout, cwd=local_path)
+                        rc, out, err = run_external(
+                            cfg.codex_cmd,
+                            args,
+                            payload_to_send,
+                            cfg.codex_timeout,
+                            cwd=local_path,
+                        )
                         processed_out = postprocess_stdout(out, cfg.codex_cmd)
 
-                        ok = bool(processed_out.strip())
+                        ok = (rc == 0) and bool(processed_out.strip())
                         comment_body = format_result_comment(ok, run_id, rc, processed_out, err)
+                        combined = "\n".join(part for part in (out, err) if part)
+                        codex_id = extract_codex_run_id(combined) or (resume_target if resume_flag else None)
 
                         try:
                             gh.post_issue_comment(repo, number, comment_body)
@@ -718,17 +854,25 @@ def main():
                             "last_run_at": _now_utc(),
                             "last_comment_id": trigger_id,
                             "run_id": run_id,
-                            "resume": resume,
+                            "resume": resume_flag,
                             "returncode": rc,
                             "source": "issue",
+                            "codex_run_id": codex_id,
                         }
 
-                        issue_runs[str(number)] = {
-                            "last_issue_updated": issue_updated_at,
-                            "run_id": run_id,
-                            "returncode": rc,
-                            "status": "ok" if ok else "error",
-                        }
+                        issue_run_record = dict(issue_state)
+                        issue_run_record.update(
+                            {
+                                "last_issue_updated": issue_updated_at,
+                                "run_id": run_id,
+                                "returncode": rc,
+                                "status": "ok" if ok else "error",
+                            }
+                        )
+                        if codex_id:
+                            issue_run_record["codex_run_id"] = codex_id
+
+                        issue_runs[str(number)] = issue_run_record
 
                         st.save()
 
