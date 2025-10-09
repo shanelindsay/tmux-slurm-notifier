@@ -68,5 +68,4 @@ All behaviour is controlled through environment variables (defaults in parenthes
 - For an end-to-end validation workflow (including multi-repo discovery and GitHub behaviour), follow `dev/s/POSIS_TEST_PLAN.md`.
 
 ## Related Documents
-- `dev/s/POSIS_MONODISK.md` – authoritative architecture, design notes, and single-document deployment guide.
 - `dev/s/POSIS_TEST_PLAN.md` – detailed manual/agent test scenarios.
