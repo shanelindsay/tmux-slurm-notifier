@@ -6,7 +6,7 @@ Watches *multiple* GitHub repositories found under a local root folder.
 For each repo, it polls issue comments since the last watermark and looks
 for a regex trigger in the comment text. When matched, it collects the full
 issue context, optionally includes a "parent issue", runs an external command
-(e.g., "codecs exec --stdin") with the context as stdin **in that repo's
+(e.g., "codex exec -") with the context as stdin **in that repo's
 working directory**, and posts the result back to the issue as a comment.
 
 Key differences vs the single-repo watcher:
@@ -16,22 +16,25 @@ Key differences vs the single-repo watcher:
 - Regex-based trigger (POSIS_REGEX), case-insensitive by default.
 
 Environment variables
----------------------
+----------------------
 GITHUB_TOKEN         : Personal access token with repo scope (classic) or fine-grained with issues:read/write.
 POSIS_ROOT           : Local root directory that contains subfolders with git repos. Default: current working dir.
 POSIS_RECURSIVE      : "1" to discover repos recursively, else only immediate children. Default: "0".
-POSIS_REGEX          : Regex to match in issue comments (case-insensitive). Default: r"##codecs".
+POSIS_REGEX          : Regex to match in issue comments (case-insensitive). Default: r"codexe".
+POSIS_MATCH_TARGET   : "comments" (default) or "issue_or_comments" to also inspect issue titles/bodies.
 POSIS_POLL_SECONDS   : Poll interval in seconds. Default: 20.
+POSIS_PER_REPO_PAUSE : Seconds to sleep between repos each loop. Default: 0.3.
 POSIS_STATE          : Path to state file (json). Default: '<POSIS_ROOT>/.posis_state_multi.json'.
-CODECS_CMD           : Path to external command to run. Default: 'codecs'.
-CODECS_ARGS          : Args for the external command. Default: 'exec --stdin'.
-CODECS_TIMEOUT       : Seconds before the external command is killed. Default: 3600.
+CODEX_CMD            : Path to external command to run. Default: 'codex'.
+CODEX_ARGS           : Args for the external command. Default: 'exec -'.
+CODEX_TIMEOUT        : Seconds before the external command is killed. Default: 3600.
 POSIS_LOCKFILE       : Path to a lock file to prevent multiple concurrent watchers. Default: '<POSIS_ROOT>/.posis_multi.lock'.
 
 Optional quality-of-life toggles
 --------------------------------
 POSIS_REQUIRE_MARKER : If set to "1", only watch repos that contain a file named '.posis-enabled'. Default: "0".
 POSIS_EXCLUDE_DIRS   : Comma-separated directory names to skip during discovery (e.g., 'venv,node_modules'). Default: "".
+POSIS_IGNORE_SELF    : If "1" (default) skip comments authored by the authenticated account; set "0" to allow self-triggers.
 
 Usage
 -----
@@ -146,21 +149,29 @@ class Config:
     token: str
     root: Path
     recursive: bool = field(default_factory=lambda: os.getenv("POSIS_RECURSIVE", "0") == "1")
-    regex: str = field(default_factory=lambda: os.getenv("POSIS_REGEX", r"##codecs"))
+    regex: str = field(default_factory=lambda: os.getenv("POSIS_REGEX", r"codexe"))
+    match_target: str = field(default_factory=lambda: os.getenv("POSIS_MATCH_TARGET", "comments"))
     poll_seconds: int = field(default_factory=lambda: int(os.getenv("POSIS_POLL_SECONDS", "20")))
+    per_repo_pause: float = field(default_factory=lambda: float(os.getenv("POSIS_PER_REPO_PAUSE", "0.3")))
     state_path: Path = field(default=None)
-    codecs_cmd: str = field(default_factory=lambda: os.getenv("CODECS_CMD", "codecs"))
-    codecs_args: List[str] = field(default_factory=lambda: os.getenv("CODECS_ARGS", "exec --stdin").split())
-    codecs_timeout: int = field(default_factory=lambda: int(os.getenv("CODECS_TIMEOUT", "3600")))
+    codex_cmd: str = field(default_factory=lambda: os.getenv("CODEX_CMD", "codex"))
+    codex_args: List[str] = field(default_factory=lambda: os.getenv("CODEX_ARGS", "exec -").split())
+    codex_timeout: int = field(default_factory=lambda: int(os.getenv("CODEX_TIMEOUT", "3600")))
     lockfile: Path = field(default=None)
     require_marker: bool = field(default_factory=lambda: os.getenv("POSIS_REQUIRE_MARKER", "0") == "1")
     exclude_dirs: List[str] = field(default_factory=lambda: [s for s in os.getenv("POSIS_EXCLUDE_DIRS", "").split(",") if s])
+    ignore_self: bool = field(default_factory=lambda: os.getenv("POSIS_IGNORE_SELF", "1") == "1")
 
     def __post_init__(self):
         if self.state_path is None:
             self.state_path = self.root / ".posis_state_multi.json"
         if self.lockfile is None:
             self.lockfile = self.root / ".posis_multi.lock"
+        self.match_target = self.match_target.lower()
+        if self.match_target not in {"comments", "issue_or_comments"}:
+            sys.exit("POSIS_MATCH_TARGET must be 'comments' or 'issue_or_comments'.")
+        if self.per_repo_pause < 0:
+            self.per_repo_pause = 0.0
 
     @staticmethod
     def from_env() -> "Config":
@@ -236,6 +247,33 @@ class GitHub:
             url, params = next_url, {}
         return out
 
+    def list_issues_since(self, repo: str, since_iso: str, per_page: int = 100) -> List[dict]:
+        """List issues (excluding PRs) updated since ISO time."""
+        issues: List[dict] = []
+        url = f"{self.api}/repos/{repo}/issues"
+        params = {"since": since_iso, "per_page": per_page, "page": 1, "state": "all"}
+        while True:
+            r = self.session.get(url, params=params, timeout=60)
+            if r.status_code == 304:
+                break
+            r.raise_for_status()
+            batch = r.json()
+            if not isinstance(batch, list):
+                break
+            for item in batch:
+                if "pull_request" in item:
+                    continue
+                issues.append(item)
+            link = r.headers.get("Link", "")
+            if 'rel="next"' not in link:
+                break
+            m = re.search(r'<([^>]+)>;\s*rel="next"', link)
+            if not m:
+                break
+            next_url = m.group(1)
+            url, params = next_url, {}
+        return issues
+
     def post_issue_comment(self, repo: str, number: int, body: str) -> dict:
         r = self.session.post(
             f"{self.api}/repos/{repo}/issues/{number}/comments",
@@ -244,6 +282,22 @@ class GitHub:
         )
         r.raise_for_status()
         return r.json()
+
+    def add_reaction_to_comment(self, repo: str, comment_id: int, content: str) -> bool:
+        url = f"{self.api}/repos/{repo}/issues/comments/{comment_id}/reactions"
+        headers = {
+            "Accept": "application/vnd.github+json, application/vnd.github.squirrel-girl-preview+json",
+            "Content-Type": "application/json",
+        }
+        r = self.session.post(url, json={"content": content}, headers=headers, timeout=30)
+        log = logging.getLogger("posis-multi")
+        log.info("Reaction response for %s comment %s: %s", repo, comment_id, r.status_code)
+        if r.status_code in (200, 201):
+            return True
+        if r.status_code in (204, 409):
+            return False
+        r.raise_for_status()
+        return True
 
 class State:
     def __init__(self, path: Path):
@@ -276,10 +330,14 @@ class State:
                 "last_since": _iso(_dt.datetime.utcnow() - _dt.timedelta(days=7)),
                 "processed_comment_ids": [],
                 "runs": {},
+                "issue_runs": {},
             }
         else:
             # keep path up to date if it changed
             self.data["repos"][repo]["path"] = str(path)
+            self.data["repos"][repo].setdefault("processed_comment_ids", [])
+            self.data["repos"][repo].setdefault("runs", {})
+            self.data["repos"][repo].setdefault("issue_runs", {})
 
     def save(self):
         tmp = self.path + ".tmp"
@@ -334,10 +392,7 @@ def build_job_input(repo: str, issue: dict, comments: List[dict], parent: Option
         "=== INITIAL INSTRUCTIONS (SYSTEM) ===",
         "1) Read the 'ISSUE BODY', 'PARENT ISSUE BODY' (if present), and 'ISSUE COMMENTS'.",
         "2) Follow the instructions contained in the issue (and parent if relevant).",
-        "3) Perform the requested work. Keep a short log of decisions made.",
-        "4) On completion, produce a clear summary of what you did and any artefacts produced.",
-        "5) Output a concise markdown report in under ~500 lines, starting with '## Result'.",
-        "6) If you could not complete the task, state blockers and next steps succinctly.",
+        "3) Perform the requested work, and provide your output.",
         "",
         "=== ISSUE BODY ===",
         issue.get("body") or "(no body)",
@@ -363,10 +418,10 @@ def build_job_input(repo: str, issue: dict, comments: List[dict], parent: Option
 
     return "\n".join(header)
 
-def run_external(codecs_cmd: str, codecs_args: List[str], payload: str, timeout: int, cwd: Path) -> Tuple[int, str, str]:
+def run_external(codex_cmd: str, codex_args: List[str], payload: str, timeout: int, cwd: Path) -> Tuple[int, str, str]:
     try:
         proc = subprocess.run(
-            [codecs_cmd] + codecs_args,
+            [codex_cmd] + codex_args,
             input=payload.encode("utf-8"),
             capture_output=True,
             timeout=timeout,
@@ -383,18 +438,56 @@ def run_external(codecs_cmd: str, codecs_args: List[str], payload: str, timeout:
     except subprocess.TimeoutExpired:
         return 124, "", f"Process timed out after {timeout}s."
     except FileNotFoundError:
-        return 127, "", f"Command not found or not executable: {codecs_cmd}"
+        return 127, "", f"Command not found or not executable: {codex_cmd}"
     except Exception as e:
         return 125, "", f"Unexpected error: {e!r}"
 
+
+def postprocess_stdout(out: str, codex_cmd: str) -> str:
+    """Trim Codex CLI chatter so comments only contain the final response."""
+    if not out:
+        return out
+    try:
+        cmd_name = Path(codex_cmd).name.lower()
+    except Exception:
+        cmd_name = codex_cmd.lower()
+
+    if cmd_name != "codex":
+        return out
+
+    lower = out.lower()
+    tokens_idx = lower.rfind("tokens used")
+    if tokens_idx == -1:
+        return out.strip()
+
+    prefix = out[:tokens_idx].rstrip()
+
+    marker_idx = prefix.lower().rfind("\ncodex\n")
+    if marker_idx == -1:
+        marker_idx = prefix.lower().rfind("\nthinking\n")
+    if marker_idx == -1:
+        marker_idx = 0
+    else:
+        marker_idx = marker_idx + prefix[marker_idx:].find("\n") + 1
+
+    trimmed = prefix[marker_idx:].strip()
+
+    lines = trimmed.splitlines()
+    if lines and lines[0].strip().lower() == "codex":
+        lines = lines[1:]
+
+    return "\n".join(lines).strip() or out.strip()
+
 def format_result_comment(ok: bool, run_id: str, returncode: int, out: str, err: str) -> str:
-    status = "✅ Completed" if ok else "⚠️ Completed with issues" if returncode == 0 else "❌ Failed"
-    header = f"POSIS run `{run_id}` status: {status}\n\n"
-    body = "### Output\n```\n" + (out or "(no stdout)") + "\n```\n"
-    if err.strip():
-        body += "\n<details>\n<summary>stderr</summary>\n\n```\n" + err + "\n```\n</details>\n"
-    footer = "\n_This comment was posted automatically by POSIS multi-repo watcher._"
-    return header + body + footer
+    out = (out or "").strip()
+    if out:
+        return out
+
+    err = (err or "").strip()
+    if err:
+        return f"```\n{err}\n```"
+
+    return f"(run {run_id} exited with code {returncode} without producing output)"
 
 def extract_resume_flag(text: str) -> bool:
     return bool(re.search(r"(?i)\bresume\b", text or ""))
@@ -436,7 +529,15 @@ def main():
 
     gh = GitHub(cfg.token)
     me = gh.me_login()
-    log.info("Authenticated as @%s, watching %d repos, regex='%s', poll=%ss", me, len(repos), cfg.regex, cfg.poll_seconds)
+    log.info(
+        "Authenticated as @%s, watching %d repos, regex='%s', poll=%ss, match_target=%s, per_repo_pause=%.2fs",
+        me,
+        len(repos),
+        cfg.regex,
+        cfg.poll_seconds,
+        cfg.match_target,
+        cfg.per_repo_pause,
+    )
 
     # Load (and create) per-repo state
     st = State(cfg.state_path)
@@ -474,7 +575,7 @@ def main():
 
                     # Ignore our own comments to prevent loops
                     author = c.get("user", {}).get("login", "")
-                    if author == me:
+                    if cfg.ignore_self and author == me:
                         meta.setdefault("processed_comment_ids", []).append(cid)
                         processed.add(cid)
                         continue
@@ -518,10 +619,19 @@ def main():
                     log.info("Trigger from @%s on %s#%d (comment %s); resume=%s; run_id=%s; cwd=%s",
                              author, repo, number, cid, resume, run_id, local_path)
 
-                    rc, out, err = run_external(cfg.codecs_cmd, cfg.codecs_args, payload, cfg.codecs_timeout, cwd=local_path)
+                    rc, out, err = run_external(cfg.codex_cmd, cfg.codex_args, payload, cfg.codex_timeout, cwd=local_path)
+                    processed_out = postprocess_stdout(out, cfg.codex_cmd)
 
-                    ok = (rc == 0) and ("## Result" in out)
-                    comment_body = format_result_comment(ok, run_id, rc, out, err)
+                    ok = bool(processed_out.strip())
+                    comment_body = format_result_comment(ok, run_id, rc, processed_out, err)
+
+                    if ok and cid is not None:
+                        try:
+                            reacted = gh.add_reaction_to_comment(repo, cid, "eyes")
+                            if reacted:
+                                log.info("Added 👀 reaction to %s comment %s", repo, cid)
+                        except Exception as e:
+                            log.warning("Failed to add reaction to %s comment %s: %r", repo, cid, e)
 
                     try:
                         gh.post_issue_comment(repo, number, comment_body)
@@ -537,6 +647,7 @@ def main():
                         "run_id": run_id,
                         "resume": resume,
                         "returncode": rc,
+                        "source": "comment",
                     }
 
                     meta.setdefault("processed_comment_ids", []).append(cid)
@@ -545,10 +656,89 @@ def main():
                     # Persist after each execution
                     st.save()
 
+                if cfg.match_target == "issue_or_comments":
+                    issue_runs = meta.setdefault("issue_runs", {})
+                    issues = gh.list_issues_since(repo, since)
+                    for issue in issues:
+                        if "pull_request" in issue:
+                            continue
+                        title_text = issue.get("title", "") or ""
+                        body_text = issue.get("body", "") or ""
+                        if not (trigger_re.search(title_text) or trigger_re.search(body_text)):
+                            continue
+
+                        number = issue.get("number")
+                        if number is None:
+                            continue
+
+                        issue_updated_at = issue.get("updated_at") or issue.get("created_at") or _now_utc()
+                        last_processed_at = issue_runs.get(str(number), {}).get("last_issue_updated")
+                        if last_processed_at == issue_updated_at:
+                            continue
+
+                        issue_comments = gh.list_issue_comments(repo, number)
+                        parent_issue = None
+                        pnum = find_parent_issue_number(body_text)
+                        if pnum:
+                            try:
+                                parent_issue = gh.get_issue(repo, pnum)
+                            except Exception as e:
+                                logging.warning("Could not fetch parent issue #%s in %s (issue trigger): %r", pnum, repo, e)
+
+                        trigger_id = issue.get("id") or f"issue-{number}"
+                        trigger_comment = {
+                            "id": trigger_id,
+                            "user": issue.get("user") or {},
+                            "created_at": issue.get("created_at") or issue_updated_at,
+                            "body": body_text or title_text,
+                        }
+
+                        resume = extract_resume_flag(trigger_comment["body"])
+                        payload = build_job_input(repo, issue, issue_comments, parent_issue, trigger_comment, resume=resume)
+
+                        run_id = f"{repo.replace('/', '_')}-{number}-{trigger_id}-{int(time.time())}"
+                        log.info("Trigger from issue body/title on %s#%d; resume=%s; run_id=%s; cwd=%s",
+                                 repo, number, resume, run_id, local_path)
+
+                        rc, out, err = run_external(cfg.codex_cmd, cfg.codex_args, payload, cfg.codex_timeout, cwd=local_path)
+                        processed_out = postprocess_stdout(out, cfg.codex_cmd)
+
+                        ok = bool(processed_out.strip())
+                        comment_body = format_result_comment(ok, run_id, rc, processed_out, err)
+
+                        try:
+                            gh.post_issue_comment(repo, number, comment_body)
+                        except requests.HTTPError as e:
+                            log.error("Failed to post comment to %s#%d (issue trigger): %s", repo, number, e)
+                        except Exception as e:
+                            log.error("Unexpected error posting comment to %s#%d (issue trigger): %r", repo, number, e)
+
+                        meta.setdefault("runs", {})[str(number)] = {
+                            "status": "ok" if ok else "error",
+                            "last_run_at": _now_utc(),
+                            "last_comment_id": trigger_id,
+                            "run_id": run_id,
+                            "resume": resume,
+                            "returncode": rc,
+                            "source": "issue",
+                        }
+
+                        issue_runs[str(number)] = {
+                            "last_issue_updated": issue_updated_at,
+                            "run_id": run_id,
+                            "returncode": rc,
+                            "status": "ok" if ok else "error",
+                        }
+
+                        st.save()
+
                 # Trim processed list per repo
                 if len(meta.get("processed_comment_ids", [])) > 5000:
                     meta["processed_comment_ids"] = meta["processed_comment_ids"][-2000:]
                     st.save()
+
+                if cfg.per_repo_pause > 0:
+                    time.sleep(cfg.per_repo_pause)
 
             # End per-loop save
             st.save()

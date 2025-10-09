@@ -9,19 +9,20 @@ _Scope: single‑repo and multi‑repo watchers; GitHub issue comment triggers; 
 2. **Clone both under an upper‑level folder**, e.g. `~/work/posis-root/repoA` and `~/work/posis-root/repoB`.
 3. **Personal access token**: create a token with issues read/write. Export `GITHUB_TOKEN` in the shell that will launch tmux.
 4. **Install** Python 3.9+ and run `pip install -r requirements.txt` in the upper‑level folder (or each repo for single‑repo tests).
-5. Optional: prepare a minimal external command to prove `cwd`. For example, a shell script `codecs` that writes a file to `$(pwd)/POSIS_PROOF.txt` and echoes a markdown `## Result` line.
+5. Optional: prepare a minimal external command to prove `cwd`. For example, a shell script `codex` that writes a file to `$(pwd)/POSIS_PROOF.txt` and echoes a markdown `## Result` line.
+6. If triggers will be authored by the same account running the watcher, export `POSIS_IGNORE_SELF=0` before launching so self-comments are processed.
 
 ## B. Single‑repo watcher tests
 
 
 1. **Happy path**  
-   - In `repoA` working directory, start single‑repo watcher with `POSIS_TRIGGER=##codecs`.  
+   - In `repoA` working directory, start single‑repo watcher with `POSIS_TRIGGER=codexe`.  
    - Create GitHub issue `#1` with a task description.  
-   - Comment `##codecs start`.  
+   - Comment `codexe start`.  
    - Expect: watcher posts a result comment; verify `cwd` by checking the artefact file appears in `repoA` only.
 
 2. **Resume mode**  
-   - On the same issue, comment `##codecs resume`.  
+   - On the same issue, comment `codexe resume`.  
    - External tool should see `MODE: RESUME` in the payload; watcher posts another result comment.
 
 3. **Parent issue inclusion**  
@@ -31,7 +32,7 @@ _Scope: single‑repo and multi‑repo watchers; GitHub issue comment triggers; 
    - Expect: payload includes a `PARENT ISSUE BODY` section.
 
 4. **PRs ignored**  
-   - Open a pull request and comment `##codecs` on it.  
+   - Open a pull request and comment `codexe` on it.  
    - Expect: no action (PRs are skipped).
 
 5. **Long output truncation**  
@@ -39,7 +40,7 @@ _Scope: single‑repo and multi‑repo watchers; GitHub issue comment triggers; 
    - Expect: posted comment includes `[output truncated]` near the end.
 
 6. **Timeout**  
-   - Set `CODECS_TIMEOUT=2` and run an external command that sleeps 5 s.  
+   - Set `CODEX_TIMEOUT=2` and run an external command that sleeps 5 s.  
    - Expect: run ends with a timeout and posts a failure comment with a clear error message.
 
 ## C. Multi‑repo watcher tests
@@ -50,19 +51,21 @@ _Scope: single‑repo and multi‑repo watchers; GitHub issue comment triggers; 
    - Start the multi‑repo watcher.  
    - Expect: startup log lists both repos and their `owner/repo` mapping.
 
-2. **Per‑repo `cwd`**  
-   - Trigger `##codecs` on an issue in `repoA`; verify artefact file appears only in `repoA`.  
-   - Trigger `##codecs` in `repoB`; verify artefact appears only in `repoB`.
+2. **Per-repo `cwd`**  
+   - Trigger `codexe` on an issue in `repoA`; verify artefact file appears only in `repoA`.  
+   - Trigger `codexe` in `repoB`; verify artefact appears only in `repoB`.
+   - Confirm the triggering comment gains an 👀 reaction after a successful run.
+   - The posted result comment should contain only the Codex output (no POSIS status header).
 
 3. **Regex matching**  
-   - Set `POSIS_TRIGGER_REGEX='##codecs\b'`. Comment variants:  
-     - `##codecs` → should match.  
-     - `##CODECS resume` → should match (case‑insensitive).  
-     - `codecs` (no hashes) → should not match.
+   - Set `POSIS_TRIGGER_REGEX='codexe\b'`. Comment variants:  
+     - `codexe` → should match.  
+     - `CODEXE resume` → should match (case‑insensitive).  
+     - `codex` → should not match.
 
 4. **Match titles/bodies**  
    - Set `POSIS_MATCH_TARGET=issue_or_comments`.  
-   - Create a new issue whose body contains `##codecs`.  
+   - Create a new issue whose body contains `codexe`.  
    - Expect: watcher triggers even without a comment.
 
 5. **Rate‑limit behaviour**  
@@ -84,16 +87,16 @@ _Scope: single‑repo and multi‑repo watchers; GitHub issue comment triggers; 
 ## E. Operational checklist
 
 
-- Logs are written via stdout/stderr; the tmux launchers pipe to `posis.log`/`posis_multi.log`.  
+- Logs are written via stdout/stderr (attach to the tmux session to watch live output).  
 - State files: `.posis_state.json` and `.posis_multi_state.json`. Validate they contain processed IDs and timestamps.  
-- Environment captured: ensure `which codecs` resolves inside tmux before starting the watcher.  
+- Environment captured: ensure `which codex` resolves inside tmux before starting the watcher.  
 - Clean shutdown: `Ctrl‑C` inside tmux pane or `tmux kill-session -t posis(-multi)`.
 
 ## F. Acceptance criteria
 
 
 - Triggering comments cause exactly one run per comment across restarts.  
-- Result comments contain stdout and a collapsible stderr section.  
+- Result comments mirror the Codex stdout (failure details fall back to stderr in a code block).  
 - External command runs in the correct repo directory and can create files there.  
 - Parent issue text is included when marked.  
 - Timeouts and truncation are handled gracefully.  
