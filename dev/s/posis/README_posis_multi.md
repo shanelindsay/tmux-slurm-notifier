@@ -10,6 +10,7 @@ POSIS watches GitHub issues for a trigger phrase and hands the conversation to a
 - Posts the model's final stdout back to GitHub (trimmed to remove Codex CLI chatter) with truncation and timeout safeguards.
 - Adds an 👀 reaction to the triggering comment whenever a run completes successfully.
 - tmux launcher script (`tmux-start-multi.sh`) keeps the watcher alive in a named session.
+- Remembers the last Codex run per issue so a plain `codexe` comment resumes by default; force a fresh run with `codexe new` or resume a specific id with `codexe resume <id>`.
 
 ## Prerequisites
 - Python 3.9 or newer (CentOS 7 users: load a modern Python module or conda env).
@@ -51,7 +52,10 @@ All behaviour is controlled through environment variables (defaults in parenthes
 - `POSIS_LOCKFILE` (`$POSIS_ROOT/.posis_multi.lock`): Prevents multiple watcher instances in the same root.
 - `CODEX_CMD` (`codex`): External command to execute.
 - `CODEX_ARGS` (`exec -`): Arguments passed to `CODEX_CMD`.
+- `CODEX_RESUME_ARGS` (`resume`): Arguments used when resuming a Codex run; combined with the run id.
 - `CODEX_TIMEOUT` (`3600`): Seconds before the external command is terminated.
+- `POSIS_DEFAULT_RESUME` (`1`): When `1`, a plain `codexe` resumes the last run if present; set to `0` to always start new unless `resume` appears.
+- `POSIS_RESUME_SEND_CONTEXT` (`0`): When `1`, still sends the assembled issue context on resume (stdin); keep `0` if your Codex CLI expects no input when resuming.
 
 ## State, Logging, and Shutdown
 - State is committed to `.posis_state_multi.json` so restarts resume without duplicate work.
