@@ -73,16 +73,6 @@ ISO8601 = "%Y-%m-%dT%H:%M:%SZ"
 
 _ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 _WATERMARK_BACKOFF = _dt.timedelta(seconds=30)
-_ENV_ALLOWLIST = {
-    "PATH",
-    "HOME",
-    "SHELL",
-    "LANG",
-    "LC_ALL",
-    "TERM",
-    "TMPDIR",
-    "PYTHONPATH",
-}
 
 def _now_utc() -> str:
     return _dt.datetime.utcnow().strftime(ISO8601)
@@ -116,22 +106,12 @@ def _compute_new_since(previous: str, batches: Iterable[Iterable[dict]]) -> str:
 
 
 def _build_subprocess_env(cwd: Path) -> Dict[str, str]:
-    env: Dict[str, str] = {}
-    for key in _ENV_ALLOWLIST:
-        value = os.environ.get(key)
-        if value is not None:
-            env[key] = value
+    env = dict(os.environ)
 
-    for key, value in os.environ.items():
-        if key.startswith("POSIS_"):
-            env[key] = value
+    if env.get("POSIS_FORWARD_GITHUB_TOKEN") != "1":
+        env.pop("GITHUB_TOKEN", None)
 
-    if os.environ.get("POSIS_FORWARD_GITHUB_TOKEN") == "1":
-        token = os.environ.get("GITHUB_TOKEN")
-        if token:
-            env["GITHUB_TOKEN"] = token
-
-    env.setdefault("PWD", str(cwd))
+    env["PWD"] = str(cwd)
     return env
 
 def discover_git_remote(path: Path) -> Optional[str]:
