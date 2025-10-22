@@ -161,7 +161,7 @@ CMD="cd $(printf %q "$REPO_ROOT") && $(build_env_prefix) ./dev/monitor_job.sh $(
 if [[ $EXIT_ON_TIMEOUT -eq 1 ]]; then CMD+=" --exit-on-timeout"; else CMD+=" --keep-after-timeout"; fi
 if (( KEEP_WINDOW )); then CMD+=" --keep-window"; fi
 
-TMUX_ARGS=( new-window -c "$REPO_ROOT" -t "${SESSION}:" -n "" bash -lc "$CMD" )
+TMUX_ARGS=( new-window -c "$REPO_ROOT" -t "${SESSION}:" -n "$WINDOW_NAME" bash -lc "$CMD" )
 
 if (( DRYRUN )); then
   printf 'DRY-RUN -> tmux'
