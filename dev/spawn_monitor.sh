@@ -141,7 +141,7 @@ sanitize(){ sed -E 's/[^A-Za-z0-9._-]+/_/g' <<<"$1"; }
 WINDOW_NAME="mon-$(sanitize "$JOBID")"
 MONITOR_TARGET="${SESSION}:${WINDOW_NAME}"
 
-window_exists() { tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -Fxq "$WINDOW_NAME"; }
+window_exists() { tmux list-windows -t "${SESSION}:" -F '#{window_name}' 2>/dev/null | grep -Fxq "$WINDOW_NAME"; }
 (( REUSE )) && window_exists && tmux kill-window -t "$MONITOR_TARGET" || true
 
 # Env exports to child pane
@@ -161,7 +161,7 @@ CMD="cd $(printf %q "$REPO_ROOT") && $(build_env_prefix) ./dev/monitor_job.sh $(
 if [[ $EXIT_ON_TIMEOUT -eq 1 ]]; then CMD+=" --exit-on-timeout"; else CMD+=" --keep-after-timeout"; fi
 if (( KEEP_WINDOW )); then CMD+=" --keep-window"; fi
 
-TMUX_ARGS=( new-window -c "$REPO_ROOT" -t "$SESSION" -n "$WINDOW_NAME" bash -lc "$CMD" )
+TMUX_ARGS=( new-window -c "$REPO_ROOT" -t "${SESSION}:" -n "" bash -lc "$CMD" )
 
 if (( DRYRUN )); then
   printf 'DRY-RUN -> tmux'
