@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-watcher"
+version = "0.1.0"
+description = "Multi-repository GitHub issues watcher that delegates work to Codex"
+readme = "README.md"
+authors = [{ name = "Shane Lindsay" }]
+license = { file = "../LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+  "requests>=2.28",
+]
+
+[project.optional-dependencies]
+ntfy = ["ntfy[requests]>=1.0"]
+
+[project.scripts]
+codex-watcher = "codex_watcher.cli:main"
+
+[tool.setuptools]
+packages = ["codex_watcher"]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.package-data]
+"codex_watcher" = ["py.typed"]

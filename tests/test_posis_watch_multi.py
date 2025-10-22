@@ -6,6 +6,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / 'codex_tooling' / 'src') not in sys.path:
+    sys.path.insert(0, str(ROOT / 'codex_tooling' / 'src'))
+
+from codex_watcher import watch_multi as pwm
 
 if "requests" not in sys.modules:
     class _StubSession:
@@ -24,7 +29,6 @@ if "requests" not in sys.modules:
     sys.modules["requests"] = types.SimpleNamespace(Session=_StubSession, HTTPError=Exception)
 
 
-from dev.s.posis import posis_watch_multi as pwm
 
 
 class ParseRemoteTests(unittest.TestCase):
@@ -282,3 +286,11 @@ class SubprocessEnvTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompatibilityImportTests(unittest.TestCase):
+    def test_legacy_module_aliases_new_package(self):
+        from dev.s.posis import posis_watch_multi as legacy
+
+        self.assertIs(legacy.Config, pwm.Config)
+        self.assertIs(legacy.run_external, pwm.run_external)

@@ -6,7 +6,7 @@
 
 ```bash
 jid=$(sbatch path/to/job.sbatch | awk '{print $4}')
-./dev/spawn_monitor.sh "$jid"
+./notifier/spawn_monitor.sh "$jid"
 # Parse the single line (key/value payload — sample shown):
 # MONITOR_DONE job=<id> state=<STATE> exit=A:B elapsed=HH:MM:SS crumb=STATE1->STATE2 partition=compute nodelist=c003 nodes=1 timelimit=00:10:00 stdout=/path/slurm-<id>.out workdir=/path req_tres=cpu=4,mem=16G submit_time=2025-10-07T16:00:00
 ```
@@ -20,7 +20,7 @@ jid=$(sbatch path/to/job.sbatch | awk '{print $4}')
 ## Options (CLI)
 
 ```
-./dev/spawn_monitor.sh <jobid> [options]
+./notifier/spawn_monitor.sh <jobid> [options]
 
 -i, --interval <sec>     Steady-state poll interval after first 3 min (default: 60)
 -t, --timeout  <min>     Upper bound monitor time in minutes (default: 720)
@@ -48,7 +48,7 @@ jid=$(sbatch path/to/job.sbatch | awk '{print $4}')
 Monitor a specific task by suffixing `<taskid>`:
 
 ```bash
-./dev/spawn_monitor.sh "123456_7"
+./notifier/spawn_monitor.sh "123456_7"
 ```
 
 ## Success criteria

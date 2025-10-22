@@ -17,7 +17,7 @@ Your agent can simply watch stdin for the `MONITOR_DONE` line, parse the key/val
 jid=$(sbatch job.sbatch | awk '{print $4}')
 
 # 2. Launch the monitor from inside tmux (non-blocking)
-./dev/spawn_monitor.sh "$jid"
+./notifier/spawn_monitor.sh "$jid"
 
 # 3. Consume the completion line from your agent
 # MONITOR_DONE job=<id> state=<STATE> exit=A:B elapsed=HH:MM:SS crumb=STATE1->STATE2 partition=compute nodelist=c003 nodes=1 timelimit=00:10:00 stdout=/path/slurm-<id>.out ...
@@ -34,8 +34,8 @@ Full CLI options, array-job tips, and success criteria live in [`dev/tmux-slurm-
 
 ## Files
 
-- `dev/spawn_monitor.sh` – tmux launcher; detects your pane and exports env vars for the watcher
-- `dev/monitor_job.sh` – polling daemon (`squeue ➜ sacct`), emits status + `MONITOR_DONE`, handles ntfy
+- `notifier/spawn_monitor.sh` – tmux launcher; detects your pane and exports env vars for the watcher
+- `notifier/monitor_job.sh` – polling daemon (`squeue ➜ sacct`), emits status + `MONITOR_DONE`, handles ntfy
 - `dev/tmux-slurm-monitor.md` – user guide you can drop into your own `AGENTS.md`
 
 ## Installation
@@ -59,3 +59,11 @@ Add the repo (or just the `dev/` directory) to your `$PATH`, or copy the scripts
 ## License
 
 Released under the MIT License – see [LICENSE](LICENSE).
+
+## Codex tooling
+
+Codex-specific automation now lives under [`codex_tooling/`](codex_tooling/). The
+folder mirrors the structure planned for a standalone repository and exposes
+`codex_watcher`, a Python package that replaces the legacy `dev/s/posis`
+modules. Legacy tmux launchers continue to work via compatibility shims while
+new code should depend on `codex_watcher` directly.
