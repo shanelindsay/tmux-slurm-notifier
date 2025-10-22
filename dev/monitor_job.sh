@@ -137,13 +137,13 @@ to_secs(){
     return
   fi
   if [[ "$t" =~ ^([0-9]+)-([0-9]{2}):([0-9]{2}):([0-9]{2})$ ]]; then
-    echo $(( ${BASH_REMATCH[1]}*86400 + ${BASH_REMATCH[2]}*3600 + ${BASH_REMATCH[3]}*60 + ${BASH_REMATCH[4]} ))
+    echo $(( 10#${BASH_REMATCH[1]}*86400 + 10#${BASH_REMATCH[2]}*3600 + 10#${BASH_REMATCH[3]}*60 + 10#${BASH_REMATCH[4]} ))
   elif [[ "$t" =~ ^([0-9]{2}):([0-9]{2}):([0-9]{2})$ ]]; then
-    echo $(( ${BASH_REMATCH[1]}*3600 + ${BASH_REMATCH[2]}*60 + ${BASH_REMATCH[3]} ))
+    echo $(( 10#${BASH_REMATCH[1]}*3600 + 10#${BASH_REMATCH[2]}*60 + 10#${BASH_REMATCH[3]} ))
   elif [[ "$t" =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
-    echo $(( ${BASH_REMATCH[1]}*60 + ${BASH_REMATCH[2]} ))
+    echo $(( 10#${BASH_REMATCH[1]}*60 + 10#${BASH_REMATCH[2]} ))
   elif [[ "$t" =~ ^[0-9]+$ ]]; then
-    echo "$t"
+    echo $((10#$t))
   else
     echo 0
   fi
@@ -448,6 +448,26 @@ TLIM_RUN_SECS="$(read_timelimit || true)"
 if [[ -n "$TLIM_RUN_SECS" ]]; then
   log "SLURM TimeLimit (run): ${TLIM_RUN_SECS}s"
 fi
+
+collect_metadata
+
+initial_brief(){
+  local partition_display="${SQUEUE_PARTITION:-unknown}"
+  local node_display="${SQUEUE_NODELIST:-$NODELIST_ALLOC}"
+  if [[ -z "$node_display" || "$node_display" == "(null)" ]]; then
+    node_display="n/a"
+  fi
+  local target_display="n/a"
+  if [[ -n "${TMUX_TARGET:-}" ]]; then
+    target_display="${TMUX_TARGET%.*}"
+  fi
+  printf '[monitor] job %s launched partition=%s nodes=%s req_mem=%s cpus=%s submit=%s target=%s' \
+    "$JOBID" "${partition_display}" "${node_display}" "${REQ_MEM:-n/a}" \
+    "${NUM_CPUS:-${CPUS_TASK:-n/a}}" "${SUBMIT_TIME:-n/a}" "${target_display}"
+}
+
+notify_tmux "$(initial_brief)"
+notify_ntfy "$(initial_brief)"
 
 STATE=""
 ELAPSED="00:00:00"
