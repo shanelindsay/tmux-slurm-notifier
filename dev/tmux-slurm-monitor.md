@@ -16,6 +16,13 @@ jid=$(sbatch path/to/job.sbatch | awk '{print $4}')
 - **Auto-cleanup:** monitor window closes after `MONITOR_DONE`.
 - **Polling:** 10 s for first 3 min, then 60 s thereafter.
 - **Upper bound:** 12 h (720 min).
+- **Heartbeats:** monitor window prints a heartbeat every 180 s with elapsed time and the latest stdout tail (1 line, 160 chars by default).
+
+### Heartbeat controls
+
+- `--heartbeat-sec <N>` changes the cadence (set to `0` to disable; `--no-heartbeat` is shorthand).
+- `--tail-lines <N>` and `--tail-width <N>` control how much of the stdout log is shown with each heartbeat.
+- Tail output only appears when new content arrives; nothing is sent back to your agent pane, it stays inside the monitor window.
 
 ## Options (CLI)
 

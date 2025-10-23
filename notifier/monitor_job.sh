@@ -15,6 +15,13 @@ if [[ -z "${NTFY_TOPIC:-}" && "${NTFY_DISABLE:-0}" != "1" ]]; then
   NTFY_TOPIC="hpc-shane"
 fi
 
+HEARTBEAT_ENABLED=1
+HEARTBEAT_SEC=${MONITOR_HEARTBEAT_SEC:-180}
+TAIL_LINES=${MONITOR_TAIL_LINES:-1}
+TAIL_WIDTH=${MONITOR_TAIL_WIDTH:-160}
+LAST_HEARTBEAT_TS=0
+LAST_TAIL_SNIPPET=""
+
 notify_ntfy(){
   if [[ "${NTFY_DISABLE:-0}" == "1" ]]; then
     return
@@ -42,6 +49,10 @@ Usage:
 Options:
   --on-success <cmd>   Run after COMPLETED with exit code 0 (optional)
   --on-fail <cmd>      Run after any non-success terminal state (optional)
+  --heartbeat-sec N    Emit heartbeat lines every N seconds (default 180; 0 disables)
+  --no-heartbeat       Disable heartbeat output (overrides --heartbeat-sec)
+  --tail-lines N       Tail the last N lines on heartbeat (default 1; 0 disables)
+  --tail-width N       Limit tail snippet to N characters (default 160)
   --keep-window        Leave the monitor tmux window open after completion
 Env:
   TMUX_TARGET=<session:win.pane>        # agent pane to notify (recommended)
@@ -51,32 +62,64 @@ USAGE
 }
 
 JOBID="${1:-}"; [[ -n "$JOBID" ]] || { usage; die "missing jobid"; }
-INTERVAL="${2:-60}"
-TIMEOUT_MIN="${3:-720}"
+shift || true
 
+INTERVAL=60
+TIMEOUT_MIN=720
 EXIT_ON_TIMEOUT=1
 KEEP_WINDOW=0
 ON_SUCCESS=""
 ON_FAIL=""
-shift_count=0
 
-# Pull compatibility flags and hooks
-for arg in "${@:4}"; do
-  case "$arg" in
-    --exit-on-timeout) EXIT_ON_TIMEOUT=1;;
-    --keep-after-timeout) EXIT_ON_TIMEOUT=0;;
-    --keep-window) KEEP_WINDOW=1;;
-    --on-success) shift_count=1;;
-    --on-fail)    shift_count=2;;
-    *)
-      if (( shift_count == 1 )); then ON_SUCCESS="$arg"; shift_count=0; continue; fi
-      if (( shift_count == 2 )); then ON_FAIL="$arg"; shift_count=0; continue; fi
-      ;;
+if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+  INTERVAL="$1"
+  shift
+fi
+
+if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+  TIMEOUT_MIN="$1"
+  shift
+fi
+
+while (( $# )); do
+  case "$1" in
+    --exit-on-timeout) EXIT_ON_TIMEOUT=1; shift;;
+    --keep-after-timeout) EXIT_ON_TIMEOUT=0; shift;;
+    --keep-window) KEEP_WINDOW=1; shift;;
+    --no-heartbeat) HEARTBEAT_ENABLED=0; HEARTBEAT_SEC=0; shift;;
+    --heartbeat-sec)
+      [[ -n "${2:-}" ]] || die "--heartbeat-sec requires a value"
+      HEARTBEAT_SEC="$2"; HEARTBEAT_ENABLED=1; shift 2;;
+    --tail-lines)
+      [[ -n "${2:-}" ]] || die "--tail-lines requires a value"
+      TAIL_LINES="$2"; shift 2;;
+    --tail-width)
+      [[ -n "${2:-}" ]] || die "--tail-width requires a value"
+      TAIL_WIDTH="$2"; shift 2;;
+    --on-success)
+      [[ -n "${2:-}" ]] || die "--on-success requires a command"
+      ON_SUCCESS="$2"; shift 2;;
+    --on-fail)
+      [[ -n "${2:-}" ]] || die "--on-fail requires a command"
+      ON_FAIL="$2"; shift 2;;
+    --help|-h) usage; exit 0;;
+    --*) die "Unknown option: $1";;
+    *) die "Unexpected argument: $1";;
   esac
- done
+done
 
 [[ "$INTERVAL" =~ ^[0-9]+$ ]] || die "interval must be integer seconds"
 [[ "$TIMEOUT_MIN" =~ ^[0-9]+$ ]] || die "timeout must be integer minutes"
+if (( HEARTBEAT_ENABLED )); then
+  [[ "$HEARTBEAT_SEC" =~ ^[0-9]+$ ]] || die "heartbeat-sec must be integer seconds"
+else
+  HEARTBEAT_SEC=0
+fi
+if (( HEARTBEAT_ENABLED )) && (( HEARTBEAT_SEC == 0 )); then
+  HEARTBEAT_ENABLED=0
+fi
+[[ "$TAIL_LINES" =~ ^[0-9]+$ ]] || die "tail-lines must be non-negative integer"
+[[ "$TAIL_WIDTH" =~ ^[0-9]+$ ]] || die "tail-width must be non-negative integer"
 TIMEOUT_SEC=$(( TIMEOUT_MIN * 60 ))
 
 JOBROOT="${JOBID%%_*}"   # handles 12345_7 -> 12345 (for scontrol lookups)
@@ -426,7 +469,7 @@ build_done_line(){
   fi
   append_kv "target_session" "$target_session"
   append_kv "target_window" "$target_window"
-  append_kv "monitor_window" "${TMUX_MONITOR_WINDOW:-}"
+append_kv "monitor_window" "${TMUX_MONITOR_WINDOW:-}"
 
   local done="MONITOR_DONE job=${JOBID} state=${STATE} exit=${EXIT} elapsed=${ELAPSED} crumb=${BREADCRUMB}"
   if (( ${#EXTRA_FIELDS[@]} )); then
@@ -434,6 +477,92 @@ build_done_line(){
     done+=" ${EXTRA_FIELDS[*]}"
   fi
   printf '%s' "$done"
+}
+
+tail_snippet(){
+  if (( TAIL_LINES <= 0 || TAIL_WIDTH <= 0 )); then
+    return 1
+  fi
+
+  if [[ -z "$STDOUT_PATH" || "$STDOUT_PATH" == "(null)" ]]; then
+    collect_metadata
+  fi
+
+  local path="$STDOUT_PATH"
+  if [[ -z "$path" || "$path" == "(null)" || ! -f "$path" ]]; then
+    return 1
+  fi
+
+  local content
+  content="$(tail -n "$TAIL_LINES" -- "$path" 2>/dev/null || true)"
+  if [[ -z "$content" ]]; then
+    return 1
+  fi
+
+  content="${content//$'\r'/}"
+  content="${content//$'\t'/ }"
+  content="$(printf '%s' "$content" | tr '\n' ' ')"
+  content="$(printf '%s' "$content" | LC_ALL=C tr -cd '[:print:] ')"
+  content="$(printf '%s' "$content" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+
+  if [[ -z "$content" ]]; then
+    return 1
+  fi
+
+  local width=$TAIL_WIDTH
+  if (( width > 0 && ${#content} > width )); then
+    if (( width > 3 )); then
+      content="${content:0:width-3}..."
+    else
+      content="${content:0:width}"
+    fi
+  fi
+
+  if [[ "$content" == "$LAST_TAIL_SNIPPET" ]]; then
+    return 1
+  fi
+
+  LAST_TAIL_SNIPPET="$content"
+  printf '%s' "$content"
+}
+
+maybe_emit_heartbeat(){
+  local now="$1"
+  if (( HEARTBEAT_ENABLED == 0 || HEARTBEAT_SEC <= 0 )); then
+    return
+  fi
+
+  if (( LAST_HEARTBEAT_TS == 0 )); then
+    LAST_HEARTBEAT_TS=$START_TS
+  fi
+
+  if (( now - LAST_HEARTBEAT_TS < HEARTBEAT_SEC )); then
+    return
+  fi
+
+  LAST_HEARTBEAT_TS=$now
+
+  local since_launch
+  since_launch="$(secs_to_hms $(( now - START_TS )))"
+  local elapsed_display="$ELAPSED"
+  if [[ -z "$elapsed_display" || "$elapsed_display" == "" ]]; then
+    elapsed_display="$since_launch"
+  fi
+
+  local state_display="${STATE:-UNKNOWN}"
+  [[ -n "$state_display" ]] || state_display="UNKNOWN"
+
+  local partition_display="${SQUEUE_PARTITION:-unknown}"
+
+  printf '[heartbeat] job %s state=%s elapsed=%s since_launch=%s partition=%s\n' \
+    "$JOBID" "$state_display" "${elapsed_display:-n/a}" "$since_launch" "$partition_display"
+
+  if (( TAIL_LINES > 0 && TAIL_WIDTH > 0 )); then
+    local snippet
+    if snippet="$(tail_snippet)"; then
+      printf '[tail] %s\n' "$snippet"
+    fi
+  fi
 }
 cleanup_window(){
   if (( KEEP_WINDOW )); then return; fi
@@ -444,6 +573,7 @@ cleanup_window(){
 
 # --- Main loop ---------------------------------------------------------------
 START_TS=$(date +%s)
+LAST_HEARTBEAT_TS=$START_TS
 TLIM_RUN_SECS="$(read_timelimit || true)"
 if [[ -n "$TLIM_RUN_SECS" ]]; then
   log "SLURM TimeLimit (run): ${TLIM_RUN_SECS}s"
@@ -519,6 +649,8 @@ while :; do
       fi
     fi
 
+    maybe_emit_heartbeat "$NOW"
+
     poll_base="$INTERVAL"
     if (( NOW - START_TS < FAST_PHASE_SEC )); then
       poll_base="$FAST_INTERVAL"
@@ -530,6 +662,7 @@ while :; do
   # 2) Not in squeue -> give accounting a brief chance to settle
   if (( SETTLE_TRIES < 3 )); then
     ((SETTLE_TRIES+=1))
+    maybe_emit_heartbeat "$NOW"
     sleep 2
     continue
   fi
@@ -546,6 +679,7 @@ while :; do
     record_breadcrumb "$STATE"
     break
   else
+    maybe_emit_heartbeat "$NOW"
     # Could be very quick job / accounting delay; retry soon
     sleep 2
   fi

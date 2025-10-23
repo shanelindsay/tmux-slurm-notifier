@@ -28,6 +28,7 @@ Defaults:
 - Auto-closes the monitor window after `MONITOR_DONE`
 - Polls every 10 s for the first 3 minutes, then every 60 s (override with `-i`)
 - Aborts after 12 h (override with `-t`)
+- Prints heartbeat lines in the monitor window every 3 minutes (adjust with `--heartbeat-sec`, disable with `--no-heartbeat`) and tails the last line of stdout (1 line, 160 chars by default)
 - Posts to ntfy topic `hpc-shane` unless `NTFY_DISABLE=1`; customize via `NTFY_TOPIC` / `NTFY_URL`
 
 Full CLI options, array-job tips, and success criteria live in [`dev/tmux-slurm-monitor.md`](dev/tmux-slurm-monitor.md).
